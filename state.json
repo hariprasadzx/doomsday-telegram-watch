@@ -1,4 +1,7 @@
 {
-  "fail": 1,
-  "seen": {}
+  "fail": 0,
+  "seen": {
+    "Kamala Cinemas 4K RGB Laser Dolby, Vadapalani, Chennai | 08:00PM": true,
+    "Kamala Cinemas 4K RGB Laser Dolby, Vadapalani, Chennai | 09:30AM": true
+  }
 }
