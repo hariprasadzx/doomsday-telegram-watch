@@ -26,6 +26,7 @@ URL = os.environ.get(
     "?frmtid=Mm5dpqTqJz",
 )
 HOME = "https://www.district.in/movies/"
+MOVIE_PATH = "/movies/avengers-doomsday-movie-tickets-in-chennai-MV176735"
 ATTEMPTS = 3
 
 # Priority theatres: display name -> lowercase keywords in the theatre name
@@ -148,19 +149,41 @@ def fetch_text() -> str:
         page = ctx.new_page()
         resp = None
         for attempt in range(1, ATTEMPTS + 1):
-            # Open District first, reload, then go to the movie page
+            # 1) Land on District's movies homepage
             try:
-                page.goto(HOME, wait_until="domcontentloaded", timeout=45_000)
-                page.wait_for_timeout(2_000)
-                page.reload(wait_until="domcontentloaded", timeout=45_000)
-                page.wait_for_timeout(2_000)
+                home = page.goto(HOME, wait_until="domcontentloaded", timeout=45_000)
+                print(f"Attempt {attempt}: homepage HTTP {home.status if home else None}, "
+                      f"title={page.title()!r}")
+                page.wait_for_timeout(3_000)
             except Exception as e:  # noqa: BLE001
-                print(f"Attempt {attempt}: home page error: {e}")
-            resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
-            status = resp.status if resp else None
-            if status != 403 and "Access Denied" not in page.title():
+                print(f"Attempt {attempt}: homepage error: {e}")
+            # 2) Navigate inside the site to the Doomsday page (like a person would)
+            how = None
+            try:
+                link = page.locator(f'a[href*="MV176735"], a[href*="avengers-doomsday"]').first
+                if link.count():
+                    link.scroll_into_view_if_needed(timeout=5_000)
+                    link.click(timeout=10_000)
+                    how = "clicked Doomsday link"
+                elif page.evaluate("!!(window.next && window.next.router)"):
+                    page.evaluate(f"window.next.router.push({json.dumps(MOVIE_PATH)})")
+                    how = "in-site navigation"
+            except Exception as e:  # noqa: BLE001
+                print(f"Attempt {attempt}: in-site navigation failed: {e}")
+            if how:
+                try:
+                    page.wait_for_url("**MV176735**", timeout=30_000)
+                except Exception:
+                    pass
+            if "MV176735" not in page.url:
+                how = "direct URL"
+                resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
+            print(f"Attempt {attempt}: reached Doomsday page via {how}")
+            blocked = "Access Denied" in page.title() or (resp is not None and resp.status == 403)
+            if not blocked:
                 break
-            print(f"Attempt {attempt}: District returned {status} (Access Denied)")
+            print(f"Attempt {attempt}: District returned Access Denied")
+            resp = None
             if attempt < ATTEMPTS:
                 page.wait_for_timeout(5_000 * attempt)
         try:
