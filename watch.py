@@ -149,9 +149,13 @@ def fetch_text() -> str:
         page = ctx.new_page()
         resp = None
         for attempt in range(1, ATTEMPTS + 1):
-            # 1) Land on District's movies homepage
+            # 1) Start at District's main page, then its movies page
             try:
-                home = page.goto(HOME, wait_until="domcontentloaded", timeout=45_000)
+                root = page.goto("https://www.district.in/", wait_until="domcontentloaded", timeout=45_000)
+                print(f"Attempt {attempt}: www.district.in HTTP {root.status if root else None}, "
+                      f"title={page.title()!r}")
+                page.wait_for_timeout(2_000)
+                home = page.goto(HOME, wait_until="domcontentloaded", timeout=45_000, referer="https://www.district.in/")
                 print(f"Attempt {attempt}: homepage HTTP {home.status if home else None}, "
                       f"title={page.title()!r}")
                 page.wait_for_timeout(3_000)
