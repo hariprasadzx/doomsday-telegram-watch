@@ -21,8 +21,11 @@ from pathlib import Path
 
 URL = os.environ.get(
     "DISTRICT_URL",
-    "https://www.district.in/movies/avengers-doomsday-movie-tickets-in-chennai-MV176735",
+    "https://www.district.in/movies/avengers-doomsday-movie-tickets-in-chennai-MV176735"
+    "?frmtid=Mm5dpqTqJz",
 )
+HOME = "https://www.district.in/movies/"
+ATTEMPTS = 3
 
 # Priority theatres: display name -> lowercase keywords in the theatre name
 WATCHLIST = {
@@ -84,7 +87,23 @@ def fetch_text() -> str:
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = ctx.new_page()
-        resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
+        resp = None
+        for attempt in range(1, ATTEMPTS + 1):
+            # Open District first, reload, then go to the movie page
+            try:
+                page.goto(HOME, wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(2_000)
+                page.reload(wait_until="domcontentloaded", timeout=45_000)
+                page.wait_for_timeout(2_000)
+            except Exception as e:  # noqa: BLE001
+                print(f"Attempt {attempt}: home page error: {e}")
+            resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
+            status = resp.status if resp else None
+            if status != 403 and "Access Denied" not in page.title():
+                break
+            print(f"Attempt {attempt}: District returned {status} (Access Denied)")
+            if attempt < ATTEMPTS:
+                page.wait_for_timeout(5_000 * attempt)
         try:
             page.wait_for_selector(r"text=/\d{1,2}:\d{2}\s?[AP]M/", timeout=30_000)
         except Exception:
