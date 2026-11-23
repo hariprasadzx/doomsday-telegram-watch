@@ -10,6 +10,7 @@ State is kept in state.json (committed back to the repo by the workflow).
 Usage:  python watch.py          normal run (exit 3 if District blocked/empty)
         python watch.py --test   send a summary only; state is not changed
 """
+import html
 import json
 import os
 import re
@@ -45,12 +46,20 @@ TIME_ANY_RE = re.compile(r"\b\d{1,2}:\d{2}\s?[AP]M\b", re.I)
 CUTOFF = "Top Cinemas in"  # generic theatre links below the listings: ignore
 
 
-def send(text: str) -> None:
+def send(text: str, button: bool = True) -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
     chat = os.environ["TELEGRAM_CHAT_ID"].strip()
-    data = urllib.parse.urlencode(
-        {"chat_id": chat, "text": text[:4000], "disable_web_page_preview": "true"}
-    ).encode()
+    payload = {
+        "chat_id": chat,
+        "text": text[:4000],
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
+    }
+    if button:
+        payload["reply_markup"] = json.dumps(
+            {"inline_keyboard": [[{"text": "🎟 Book on District", "url": URL}]]}
+        )
+    data = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage", data=data
     )
@@ -62,6 +71,56 @@ def send(text: str) -> None:
         print(f"Telegram send failed: HTTP {e.code}{hint}: {e.read()[:300]!r}")
         global SEND_FAILED
         SEND_FAILED = True
+
+
+def esc(t: str) -> str:
+    return html.escape(t, quote=False)
+
+
+def short_name(theatre: str) -> str:
+    """'PVR VR Mall, Anna Nagar, Chennai' -> 'PVR VR Mall, Anna Nagar'"""
+    return re.sub(r",\s*Chennai\b", "", theatre).strip(" ,")
+
+
+DATE_RE = re.compile(r"\b([A-Z]{3})\n(\d{1,2})\n(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b")
+
+
+def show_date(text: str) -> str:
+    m = DATE_RE.search(text)
+    return f"{m.group(3)}, {m.group(2)} {m.group(1).title()}" if m else ""
+
+
+def nice_format(f: str) -> str:
+    t = f.title()
+    for a, b in (("Ms ", "MS "), ("Imax", "IMAX"), ("4Dx", "4DX"), ("Pxl", "PXL"),
+                 ("Bigpix", "BIGPIX"), ("Epiq", "EPIQ"), ("Screenx", "ScreenX"), ("4K", "4K")):
+        t = t.replace(a, b)
+    return t
+
+
+def plural(n: int) -> str:
+    return f"{n} show" + ("" if n == 1 else "s")
+
+
+def render_shows(items) -> list:
+    """items: [(tag, show)] -> lines grouped by theatre, priority first."""
+    groups = {}
+    for tag, sh in items:
+        groups.setdefault((not sh["priority"], sh["theatre"]), []).append((tag, sh))
+    out, section = [], None
+    for (not_prio, theatre), rows in sorted(groups.items(), key=lambda kv: kv[0][0]):
+        sec = "⭐ <b>PRIORITY</b>" if not not_prio else "🎬 <b>Other theatres</b>"
+        if sec != section:
+            out += ["", sec]
+            section = sec
+        out.append(f"<b>{esc(short_name(theatre))}</b>")
+        for tag, sh in rows:
+            status = "✅ Bookable" if sh["bookable"] else "⏳ No tickets yet"
+            if tag == "NOW BOOKABLE":
+                status = "🔓 <b>Now bookable</b>"
+            fmt = f" · {esc(nice_format(sh['format']))}" if sh["format"] else ""
+            out.append(f"   🕒 <code>{esc(sh['time'])}</code>{fmt} · {status}")
+    return out
 
 
 def fetch_text() -> str:
@@ -185,35 +244,32 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
-def fmt_item(tag: str, s: dict) -> str:
-    status = "bookable" if s["bookable"] else "no tickets yet"
-    fmt = f" · {s['format']}" if s["format"] else ""
-    star = "⭐ " if s["priority"] else ""
-    return f"• {star}[{tag}] {s['theatre']} — {s['time']}{fmt} ({status})"
-
-
 def main() -> None:
     test = "--test" in sys.argv
     state = load_state()
 
     try:
         text = fetch_text()
+        date = show_date(text)
         all_theatres, shows = parse(text)
         error = None if all_theatres else "page loaded but no showtimes were found"
     except Exception as e:  # noqa: BLE001
-        all_theatres, shows, error = [], {}, f"{type(e).__name__}: {e}"
+        all_theatres, shows, error, date = [], {}, f"{type(e).__name__}: {e}", ""
 
     if error:
         print("Problem:", error)
         if test:
-            send(f"⚠️ Doomsday watch test: {error}. District may be blocking this "
-                 f"GitHub server or changed its page.\n{URL}")
+            send("⚠️ <b>Doomsday watch — test</b>\n\n"
+                 f"District didn't return showtimes: <i>{esc(error)}</i>\n"
+                 "It may be blocking this GitHub server or changed its page.")
         else:
             state["fail"] = state.get("fail", 0) + 1
             if state["fail"] == FAIL_ALERT_AFTER:
                 send(
-                    f"⚠️ Doomsday watch: {error} ({state['fail']} checks in a row). "
-                    f"District may be blocking GitHub or changed its page.\n{URL}"
+                    "⚠️ <b>Doomsday watch — not getting showtimes</b>\n\n"
+                    f"{state['fail']} checks in a row failed: <i>{esc(error)}</i>\n"
+                    "District may be blocking GitHub or changed its page. "
+                    "Checks continue; you'll get alerts as soon as it works again."
                 )
             save_state(state)
         sys.exit(1 if SEND_FAILED else 3)
@@ -236,22 +292,32 @@ def main() -> None:
           f"{len(new_items)} new" + (" (seeded others silently)" if seeding else ""))
 
     if test:
-        prio = sorted({s["theatre"] for s in shows.values() if s["priority"]}) or ["none yet"]
+        counts = {}
+        for sh in shows.values():
+            counts[sh["theatre"]] = counts.get(sh["theatre"], 0) + 1
+        prio = [t for t in all_theatres if any(
+            sh["priority"] for sh in shows.values() if sh["theatre"] == t)]
         others = [t for t in all_theatres if t not in prio]
-        msg = ("✅ Doomsday watch test run\n⭐ Priority theatres with shows:\n- "
-               + "\n- ".join(prio)
-               + f"\n\nOther theatres ({len(others)}):\n- " + "\n- ".join(others or ["none"]))
+        lines = ["✅ <b>Doomsday watch — test run</b>",
+                 f"📅 {esc(date)} · {len(all_theatres)} theatres · {len(shows)} shows" if date
+                 else f"{len(all_theatres)} theatres · {len(shows)} shows",
+                 "", "⭐ <b>PRIORITY</b>"]
+        lines += [f"• {esc(short_name(t))} — {plural(counts[t])}" for t in prio] or ["• none listed yet"]
+        lines += ["", "🎬 <b>Other theatres</b>"]
+        lines += [f"• {esc(short_name(t))} — {plural(counts[t])}" for t in others] or ["• none"]
         if new_items:
-            msg += "\n\nA normal run would alert:\n" + "\n".join(fmt_item(t, s) for t, s in new_items)
-        send(msg)
+            lines += ["", "<i>A normal check would alert you about:</i>"] + render_shows(new_items)
+        send("\n".join(lines))
         sys.exit(1 if SEND_FAILED else 0)
 
     if new_items:
-        prio_n = sum(1 for _, s in new_items if s["priority"])
-        head = ("🚨⭐ Avengers: Doomsday — PRIORITY theatre update" if prio_n
-                else "🎬 Avengers: Doomsday — new shows in Chennai")
-        lines = [head] + [fmt_item(t, s) for t, s in new_items]
-        lines.append(f"\nBook: {URL}")
+        prio_n = sum(1 for _, sh in new_items if sh["priority"])
+        head = ("🚨 <b>Avengers: Doomsday — PRIORITY theatre update!</b>" if prio_n
+                else "🎬 <b>Avengers: Doomsday — new shows in Chennai</b>")
+        lines = [head]
+        if date:
+            lines.append(f"📅 {esc(date)}")
+        lines += render_shows(new_items)
         send("\n".join(lines))
 
     if not SEND_FAILED:  # keep items unseen if Telegram failed, so they retry
