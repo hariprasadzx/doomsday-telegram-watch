@@ -313,21 +313,32 @@ def main() -> None:
           f"{len(new_items)} new" + (" (seeded others silently)" if seeding else ""))
 
     if test:
-        counts = {}
+        by_theatre = {}
         for sh in shows.values():
-            counts[sh["theatre"]] = counts.get(sh["theatre"], 0) + 1
-        prio = [t for t in all_theatres if any(
-            sh["priority"] for sh in shows.values() if sh["theatre"] == t)]
+            by_theatre.setdefault(sh["theatre"], []).append(sh)
+        prio = [t for t in all_theatres if any(sh["priority"] for sh in by_theatre.get(t, []))]
         others = [t for t in all_theatres if t not in prio]
-        lines = ["✅ <b>Doomsday watch — test run</b>",
-                 f"📅 {esc(date)} · {len(all_theatres)} theatres · {len(shows)} shows" if date
-                 else f"{len(all_theatres)} theatres · {len(shows)} shows",
+
+        def block(t):
+            rows = [f"<b>{esc(short_name(t))}</b>"]
+            for sh in by_theatre.get(t, []):
+                status = "✅" if sh["bookable"] else "⏳"
+                fmt = f" · {esc(nice_format(sh['format']))}" if sh["format"] else ""
+                rows.append(f"   🕒 <code>{esc(sh['time'])}</code>{fmt} {status}")
+            return rows
+
+        lines = ["✅ <b>Doomsday watch — all shows now</b>",
+                 (f"📅 {esc(date)} · " if date else "")
+                 + f"{len(all_theatres)} theatres · {len(shows)} shows",
                  "", "⭐ <b>PRIORITY</b>"]
-        lines += [f"• {esc(short_name(t))} — {plural(counts[t])}" for t in prio] or ["• none listed yet"]
+        for t in prio:
+            lines += block(t)
+        if not prio:
+            lines.append("<i>No shows at your priority theatres yet</i>")
         lines += ["", "🎬 <b>Other theatres</b>"]
-        lines += [f"• {esc(short_name(t))} — {plural(counts[t])}" for t in others] or ["• none"]
-        if new_items:
-            lines += ["", "<i>A normal check would alert you about:</i>"] + render_shows(new_items)
+        for t in others:
+            lines += block(t)
+        lines += ["", "✅ bookable · ⏳ no tickets yet"]
         send("\n".join(lines))
         sys.exit(1 if SEND_FAILED else 0)
 
