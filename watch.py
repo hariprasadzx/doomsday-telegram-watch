@@ -160,7 +160,7 @@ def fetch_text() -> str:
             # 2) Navigate inside the site to the Doomsday page (like a person would)
             how = None
             try:
-                link = page.locator(f'a[href*="MV176735"], a[href*="avengers-doomsday"]').first
+                link = page.locator('a[href*="in-chennai-MV176735"]').first
                 if link.count():
                     link.scroll_into_view_if_needed(timeout=5_000)
                     link.click(timeout=10_000)
@@ -172,10 +172,10 @@ def fetch_text() -> str:
                 print(f"Attempt {attempt}: in-site navigation failed: {e}")
             if how:
                 try:
-                    page.wait_for_url("**MV176735**", timeout=30_000)
+                    page.wait_for_url("**in-chennai-MV176735**", timeout=30_000)
                 except Exception:
                     pass
-            if "MV176735" not in page.url:
+            if "in-chennai-MV176735" not in page.url:
                 how = "direct URL"
                 resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
             print(f"Attempt {attempt}: reached Doomsday page via {how}")
