@@ -1,14 +1,14 @@
 """Avengers: Doomsday Chennai show watcher -> Telegram.
 
-Renders the District listing page in headless Chromium, finds showtimes at
-WATCHLIST theatres, and sends a Telegram message only when something is new:
-  - a watchlist theatre appears with showtimes,
-  - a watchlist theatre gets a new showtime,
+Renders the District listing page in headless Chromium and sends a Telegram
+message only when something is new, at ANY Chennai theatre:
+  - a theatre appears with showtimes, or gets a new showtime,
   - a show that had "No tickets" becomes bookable.
+PRIORITY theatres are starred and listed first.
 State is kept in state.json (committed back to the repo by the workflow).
 
-Usage:  python watch.py          normal run
-        python watch.py --test   also send a summary of everything found
+Usage:  python watch.py          normal run (exit 3 if District blocked/empty)
+        python watch.py --test   send a summary only; state is not changed
 """
 import json
 import os
@@ -24,7 +24,7 @@ URL = os.environ.get(
     "https://www.district.in/movies/avengers-doomsday-movie-tickets-in-chennai-MV176735",
 )
 
-# Display name -> lowercase keywords to match in the theatre's name line
+# Priority theatres: display name -> lowercase keywords in the theatre name
 WATCHLIST = {
     "Kamala": ["kamala"],
     "Rakki": ["rakki"],
@@ -35,7 +35,7 @@ WATCHLIST = {
 
 STATE_FILE = Path(__file__).with_name("state.json")
 SEND_FAILED = False
-FAIL_ALERT_AFTER = 3  # consecutive empty/failed fetches before warning you
+FAIL_ALERT_AFTER = 10  # consecutive empty/failed checks (~20 min) before warning you
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}\s?[AP]M$", re.I)
 TIME_ANY_RE = re.compile(r"\b\d{1,2}:\d{2}\s?[AP]M\b", re.I)
@@ -109,9 +109,9 @@ def is_theatre_line(line: str) -> bool:
 
 
 def parse(text: str):
-    """Return (all_theatres, watch_shows).
+    """Return (all_theatres, shows).
 
-    watch_shows: {key: {"theatre", "time", "format", "bookable"}}
+    shows: {key: {"theatre", "time", "format", "bookable", "priority"}}
     """
     first_time = TIME_ANY_RE.search(text)
     if not first_time:
@@ -135,8 +135,6 @@ def parse(text: str):
         if label and TIME_RE.match(line):
             if label not in all_theatres:
                 all_theatres.append(label)
-            if not watched:
-                continue
             no_tickets, fmt = False, ""
             for nxt in lines[i + 1 : i + 6]:
                 if TIME_RE.match(nxt) or is_theatre_line(nxt):
@@ -152,6 +150,7 @@ def parse(text: str):
                 "time": line.upper(),
                 "format": fmt,
                 "bookable": not no_tickets,
+                "priority": bool(watched),
             }
     return all_theatres, shows
 
@@ -167,6 +166,13 @@ def save_state(state: dict) -> None:
     STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
 
 
+def fmt_item(tag: str, s: dict) -> str:
+    status = "bookable" if s["bookable"] else "no tickets yet"
+    fmt = f" · {s['format']}" if s["format"] else ""
+    star = "⭐ " if s["priority"] else ""
+    return f"• {star}[{tag}] {s['theatre']} — {s['time']}{fmt} ({status})"
+
+
 def main() -> None:
     test = "--test" in sys.argv
     state = load_state()
@@ -179,50 +185,60 @@ def main() -> None:
         all_theatres, shows, error = [], {}, f"{type(e).__name__}: {e}"
 
     if error:
-        state["fail"] = state.get("fail", 0) + 1
         print("Problem:", error)
-        if test or state["fail"] == FAIL_ALERT_AFTER:
-            send(
-                f"⚠️ Doomsday watch: {error} "
-                f"({state['fail']} run(s) in a row). District may be blocking "
-                f"GitHub or changed its page.\n{URL}"
-            )
-        save_state(state)
-        if SEND_FAILED:
-            sys.exit(1)
-        return
+        if test:
+            send(f"⚠️ Doomsday watch test: {error}. District may be blocking this "
+                 f"GitHub server or changed its page.\n{URL}")
+        else:
+            state["fail"] = state.get("fail", 0) + 1
+            if state["fail"] == FAIL_ALERT_AFTER:
+                send(
+                    f"⚠️ Doomsday watch: {error} ({state['fail']} checks in a row). "
+                    f"District may be blocking GitHub or changed its page.\n{URL}"
+                )
+            save_state(state)
+        sys.exit(1 if SEND_FAILED else 3)
 
-    state["fail"] = 0
-    seen = state.setdefault("seen", {})
+    seen = dict(state.get("seen", {}))
+    # First run after enabling all-theatre alerts: record the non-priority
+    # shows already listed silently, so you are not flooded with old shows.
+    seeding = state.get("v") != 2
     new_items = []
     for key, s in shows.items():
         if key not in seen:
-            new_items.append(("NEW", s))
+            if not (seeding and not s["priority"]):
+                new_items.append(("NEW", s))
         elif s["bookable"] and not seen[key]:
             new_items.append(("NOW BOOKABLE", s))
         seen[key] = s["bookable"]
+    new_items.sort(key=lambda t: not t[1]["priority"])  # priority first
 
-    print(f"{len(all_theatres)} theatres listed, {len(shows)} watchlist shows, {len(new_items)} new")
+    print(f"{len(all_theatres)} theatres listed, {len(shows)} shows, "
+          f"{len(new_items)} new" + (" (seeded others silently)" if seeding else ""))
+
+    if test:
+        prio = sorted({s["theatre"] for s in shows.values() if s["priority"]}) or ["none yet"]
+        others = [t for t in all_theatres if t not in prio]
+        msg = ("✅ Doomsday watch test run\n⭐ Priority theatres with shows:\n- "
+               + "\n- ".join(prio)
+               + f"\n\nOther theatres ({len(others)}):\n- " + "\n- ".join(others or ["none"]))
+        if new_items:
+            msg += "\n\nA normal run would alert:\n" + "\n".join(fmt_item(t, s) for t, s in new_items)
+        send(msg)
+        sys.exit(1 if SEND_FAILED else 0)
 
     if new_items:
-        lines = ["🎬 Avengers: Doomsday — watchlist theatre update"]
-        for tag, s in new_items:
-            status = "bookable" if s["bookable"] else "no tickets yet"
-            fmt = f" · {s['format']}" if s["format"] else ""
-            lines.append(f"• [{tag}] {s['theatre']} — {s['time']}{fmt} ({status})")
+        prio_n = sum(1 for _, s in new_items if s["priority"])
+        head = ("🚨⭐ Avengers: Doomsday — PRIORITY theatre update" if prio_n
+                else "🎬 Avengers: Doomsday — new shows in Chennai")
+        lines = [head] + [fmt_item(t, s) for t, s in new_items]
         lines.append(f"\nBook: {URL}")
         send("\n".join(lines))
 
-    if test:
-        watch_names = sorted({s["theatre"] for s in shows.values()}) or ["none"]
-        send(
-            "✅ Doomsday watch test run\n"
-            f"Theatres with showtimes ({len(all_theatres)}):\n- "
-            + "\n- ".join(all_theatres)
-            + "\n\nWatchlist matches:\n- "
-            + "\n- ".join(watch_names)
-        )
-
+    if not SEND_FAILED:  # keep items unseen if Telegram failed, so they retry
+        state["seen"] = seen
+        state["v"] = 2
+    state["fail"] = 0
     save_state(state)
     if SEND_FAILED:
         sys.exit(1)
