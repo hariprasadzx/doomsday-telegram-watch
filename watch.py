@@ -160,24 +160,22 @@ def fetch_text() -> str:
             # 2) Navigate inside the site to the Doomsday page (like a person would)
             how = None
             try:
-                link = page.locator('a[href*="in-chennai-MV176735"]').first
-                if link.count():
-                    link.scroll_into_view_if_needed(timeout=5_000)
-                    link.click(timeout=10_000)
-                    how = "clicked Doomsday link"
-                elif page.evaluate("!!(window.next && window.next.router)"):
-                    page.evaluate(f"window.next.router.push({json.dumps(MOVIE_PATH)})")
-                    how = "in-site navigation"
+                # Click the Chennai Doomsday link on the homepage (JS click, so a
+                # collapsed section covering it doesn't matter)
+                with page.expect_navigation(wait_until="domcontentloaded", timeout=45_000) as nav:
+                    clicked = page.evaluate(
+                        """() => { const a = document.querySelector('a[href*="in-chennai-MV176735"]');
+                                   if (!a) return false; a.click(); return true; }"""
+                    )
+                    if not clicked:
+                        raise RuntimeError("Chennai Doomsday link not found on homepage")
+                resp = nav.value
+                how = "homepage link"
             except Exception as e:  # noqa: BLE001
-                print(f"Attempt {attempt}: in-site navigation failed: {e}")
-            if how:
-                try:
-                    page.wait_for_url("**in-chennai-MV176735**", timeout=30_000)
-                except Exception:
-                    pass
+                print(f"Attempt {attempt}: homepage link failed: {e}")
             if "in-chennai-MV176735" not in page.url:
-                how = "direct URL"
-                resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
+                how = "direct URL (homepage as referrer)"
+                resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000, referer=HOME)
             print(f"Attempt {attempt}: reached Doomsday page via {how}")
             blocked = "Access Denied" in page.title() or (resp is not None and resp.status == 403)
             if not blocked:
