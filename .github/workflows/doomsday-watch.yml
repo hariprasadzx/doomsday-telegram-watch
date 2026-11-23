@@ -39,9 +39,19 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python watch.py ${{ (github.event_name == 'workflow_dispatch' && inputs.test) && '--test' || '' }}
 
+      - name: Upload debug page
+        if: always() && hashFiles('debug/*') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: district-debug
+          path: debug/
+          retention-days: 3
+
       - name: Save state
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          [ -f state.json ] || exit 0
           git add state.json
           git diff --cached --quiet || (git commit -m "Update watch state" && git pull --rebase && git push)

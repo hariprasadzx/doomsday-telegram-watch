@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -33,6 +34,7 @@ WATCHLIST = {
 }
 
 STATE_FILE = Path(__file__).with_name("state.json")
+SEND_FAILED = False
 FAIL_ALERT_AFTER = 3  # consecutive empty/failed fetches before warning you
 
 TIME_RE = re.compile(r"^\d{1,2}:\d{2}\s?[AP]M$", re.I)
@@ -41,38 +43,63 @@ CUTOFF = "Top Cinemas in"  # generic theatre links below the listings: ignore
 
 
 def send(text: str) -> None:
-    token = os.environ["TELEGRAM_BOT_TOKEN"]
-    chat = os.environ["TELEGRAM_CHAT_ID"]
+    token = os.environ["TELEGRAM_BOT_TOKEN"].strip()
+    chat = os.environ["TELEGRAM_CHAT_ID"].strip()
     data = urllib.parse.urlencode(
         {"chat_id": chat, "text": text[:4000], "disable_web_page_preview": "true"}
     ).encode()
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/sendMessage", data=data
     )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        r.read()
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            r.read()
+    except urllib.error.HTTPError as e:
+        hint = " (bad TELEGRAM_BOT_TOKEN secret?)" if e.code == 401 else ""
+        print(f"Telegram send failed: HTTP {e.code}{hint}: {e.read()[:300]!r}")
+        global SEND_FAILED
+        SEND_FAILED = True
 
 
 def fetch_text() -> str:
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(
+        browser = p.chromium.launch(
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        ctx = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
             locale="en-IN",
+            timezone_id="Asia/Kolkata",
+            geolocation={"latitude": 13.0827, "longitude": 80.2707},
+            permissions=["geolocation"],
             viewport={"width": 1366, "height": 900},
+            extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
         )
-        page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
+        ctx.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        page = ctx.new_page()
+        resp = page.goto(URL, wait_until="domcontentloaded", timeout=60_000)
         try:
             page.wait_for_selector(r"text=/\d{1,2}:\d{2}\s?[AP]M/", timeout=30_000)
         except Exception:
             pass
         page.wait_for_timeout(3_000)
         text = page.inner_text("body")
+        if not TIME_ANY_RE.search(text):
+            # Diagnostics: show what GitHub's runner actually received
+            print("HTTP status:", resp.status if resp else None)
+            print("Final URL:", page.url)
+            print("Title:", page.title())
+            print("Body text (first 800 chars):", text[:800].replace("\n", " | "))
+            Path("debug").mkdir(exist_ok=True)
+            Path("debug/page.html").write_text(page.content())
+            page.screenshot(path="debug/page.png", full_page=True)
         browser.close()
     return text
 
@@ -161,6 +188,8 @@ def main() -> None:
                 f"GitHub or changed its page.\n{URL}"
             )
         save_state(state)
+        if SEND_FAILED:
+            sys.exit(1)
         return
 
     state["fail"] = 0
@@ -195,6 +224,8 @@ def main() -> None:
         )
 
     save_state(state)
+    if SEND_FAILED:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
