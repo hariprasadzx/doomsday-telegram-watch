@@ -1,8 +1,12 @@
 name: Doomsday watch
 
-# One job checks District every 2 minutes for ~55 minutes. The schedule
-# queues the next job (only one waits at a time), so coverage is continuous.
-# GitHub's minimum schedule is 5 min, hence the loop inside the job.
+# One job checks District every 2 minutes for ~55 minutes; the schedule queues
+# the next job so coverage is continuous (GitHub's minimum schedule is 5 min).
+#
+# Where it runs is set by the repo variable RUNNER (Settings > Secrets and
+# variables > Actions > Variables):
+#   unset / ubuntu-latest  -> GitHub's servers (District often blocks these)
+#   self-hosted            -> your own machine (home internet, not blocked)
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -17,17 +21,18 @@ permissions:
   contents: write
 
 concurrency:
-  # Test runs get their own group so they don't wait behind the hour-long loop
   group: doomsday-watch-${{ (github.event_name == 'workflow_dispatch' && inputs.test) && 'test' || 'loop' }}
   cancel-in-progress: false
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 65
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -37,8 +42,8 @@ jobs:
 
       - name: Install Playwright + Chromium
         run: |
-          pip install playwright==1.48.0
-          python -m playwright install --with-deps chromium
+          python -m pip install -q playwright==1.48.0
+          python -m playwright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium
 
       - name: Test run
         if: github.event_name == 'workflow_dispatch' && inputs.test
@@ -46,30 +51,8 @@ jobs:
 
       - name: Check District every 2 min
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test) }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          end=$((SECONDS + 55*60))
-          blocked=0
-          while :; do
-            t0=$SECONDS
-            echo "::group::Check at $(TZ=Asia/Kolkata date '+%H:%M:%S IST')"
-            rc=0; python watch.py || rc=$?
-            echo "::endgroup::"
-            if [ -n "$(git status --porcelain state.json)" ]; then
-              git add state.json
-              git commit -q -m "Update watch state"
-              git pull -q --rebase && git push -q || echo "state push failed (will retry next check)"
-            fi
-            if [ "$rc" -eq 3 ]; then blocked=$((blocked+1)); else blocked=0; fi
-            if [ "$blocked" -ge 2 ]; then
-              echo "District blocked this runner twice in a row; ending so the next job gets a new IP."
-              break
-            fi
-            wait=$((120 - (SECONDS - t0))); [ "$wait" -gt 0 ] || wait=1
-            [ $((SECONDS + wait)) -lt "$end" ] || break
-            sleep "$wait"
-          done
+        # On your own machine District doesn't block, so never give up early
+        run: python loop.py 55 ${{ vars.RUNNER == 'self-hosted' && '0' || '2' }}
 
       - name: Upload debug page
         if: always() && hashFiles('debug/*') != ''

@@ -176,7 +176,7 @@ def fetch_text() -> str:
             print("Title:", page.title())
             print("Body text (first 800 chars):", text[:800].replace("\n", " | "))
             Path("debug").mkdir(exist_ok=True)
-            Path("debug/page.html").write_text(page.content())
+            Path("debug/page.html").write_text(page.content(), encoding="utf-8")
             page.screenshot(path="debug/page.png", full_page=True)
         browser.close()
     return text
@@ -235,13 +235,13 @@ def parse(text: str):
 
 def load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text())
+        return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {"seen": {}, "fail": 0}
 
 
 def save_state(state: dict) -> None:
-    STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    STATE_FILE.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def main() -> None:
